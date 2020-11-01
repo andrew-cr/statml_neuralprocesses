@@ -14,8 +14,9 @@ num_phi_rbf = 100
 phi_rbf_sigma = 5
 phi_hidden_layer_size = 10
 z_dim = 16
-num_training_funcs = 128 # Gives the numbers of betas to learn
+num_training_funcs = 1000 # Gives the numbers of betas to learn
 num_eval_points = 20 # Number of points each function is evaluated at
+obs_sigma = 0.01 # The observation standard deviation
 
 encoder_h_dim_1 = 512
 encoder_h_dim_2 = 512
@@ -50,15 +51,17 @@ def kernel(X1, X2, l=1.0, sigma_f=1.0):
 
 def generate_gp_1d_dataset():
     # X = np.arange(function_xlims[0], function_xlims[1], 0.1).reshape(-1, 1)
-    output = []
+    output_X = []
+    output_samples = []
     for n in range(num_training_funcs):
         X = np.random.uniform(function_xlims[0], function_xlims[1],
             size=(num_eval_points,1))
         mu = np.zeros(X.shape)
         cov = kernel(X, X)
         sample = np.random.multivariate_normal(mu.ravel(), cov, 1)
-        output.append((X, sample))
-    return output
+        output_X.append(X)
+        output_samples.append(sample)
+    return np.array(output_X), np.array(output_samples)
 
 class Model(nn.Module):
     def __init__(self):
@@ -130,11 +133,18 @@ class Model(nn.Module):
         loss_term_1 = (x - x_enc)**2
 
         z_mean, z_std = self.encoder(beta.unsqueeze(0))
-        z_samples = z_mean + z_std * self.normal_sampler.rsample((batch_size, z_dim)).cuda()
-        # z_samples = z_mean.repeat(batch_size, 1)
-        beta_hats = self.decoder(z_samples)
-        x_dec = torch.sum(beta_hats * phi_s, dim=1)
+        # Do we draw one z_sample for all x values of this function or one z_sample for each of them?
+        # The pi-vae paper in Alg1 does one z-sample for all x-values of the function
+        z_sample = z_mean + z_std * self.normal_sampler.rsample((1, z_dim)).cuda()
+        beta_hat = self.decoder(z_sample)
+        x_dec = torch.matmul(phi_s, beta_hat.squeeze()) # double check this is actually doing what we want it to
         loss_term_2 = (x - x_dec)**2
+
+        # z_samples = z_mean + z_std * self.normal_sampler.rsample((batch_size, z_dim)).cuda()
+        # z_samples = z_mean.repeat(batch_size, 1)
+        # beta_hats = self.decoder(z_samples)
+        # x_dec = torch.sum(beta_hats * phi_s, dim=1)
+        # loss_term_2 = (x - x_dec)**2
         # beta_hat = self.decoder(z_mean)
         # beta_hat = beta_hat.reshape(beta.shape)
         # loss_term_2 = torch.mean((beta_hat - beta)**2)
@@ -173,6 +183,58 @@ class Model(nn.Module):
         else:
             return x_dec, beta_hat
 
+    def draw_samples(self, s, num_samples):
+        # draw samples from the pi vae
+        # s should be (num_eval_points, dim)
+        z_samples = self.normal_sampler.rsample((num_samples, z_dim)).double().cuda()
+        beta_hats = self.decoder(z_samples)
+        phi_s = self.Phi(s)
+        x_dec = torch.matmul(beta_hats.unsqueeze(1).unsqueeze(1),
+            phi_s.unsqueeze(2).unsqueeze(0))
+        x_dec = x_dec.squeeze()
+
+        return x_dec
+
+    def get_unnormalized_log_posterior(self, s, x, z):
+        # Gets something proportional to p(z|x, s) where x and s are new test points
+        # s (batch x dim)
+        # x (batch)
+        # z (z_dim)
+
+        log_prior = -0.5 * torch.sum(z**2)
+
+        phi_s = self.Phi(s)
+        beta_hat = self.decoder(z)
+        x_dec = torch.matmul(phi_s, beta_hat)
+        log_likelihoods = (-1 / (2 * obs_sigma**2)) * (x_dec - x)**2
+
+        return log_prior + torch.sum(log_likelihoods)
+
+class MCMC():
+    def __init__(self, in_model):
+        self.model = in_model
+    
+    def draw_samples(self, num_samples, starting_point, proposal_sigma, s_star,
+        x_star):
+        z = starting_point
+        samples = torch.zeros((num_samples, z_dim)).cuda().double()
+        acc_prob_sum = 0
+        for t in range(num_samples):
+            z_p = z + torch.randn_like(z) * proposal_sigma**2
+            log_p_z = self.model.get_unnormalized_log_posterior(s_star, x_star, z)
+            log_p_z_p = self.model.get_unnormalized_log_posterior(s_star, x_star, z_p)
+            ratio = torch.exp(log_p_z_p - log_p_z)
+            acc_prob = torch.min(torch.tensor(1.0).double().cuda(), ratio)
+            u = torch.rand(1)
+            if u < acc_prob:
+                z = z_p
+            samples[t, :] = z
+            acc_prob_sum += acc_prob.detach().cpu().data
+        print("mean acc prob", acc_prob_sum/num_samples)
+        return samples
+
+
+
 def check_beta(model, id):
     test_points = torch.arange(-5, 5, 0.1).reshape(100, 1).cuda()
     phi_s = model.Phi(test_points)
@@ -185,25 +247,44 @@ def check_beta(model, id):
     plt.plot(test_points.detach().cpu().numpy(), x_encs.detach().cpu().numpy())
     plt.plot(test_points.detach().cpu().numpy().reshape(100),
         x_decs.detach().cpu().numpy().reshape(100))
-    plt.scatter(dataset[id][0].reshape(num_eval_points), dataset[id][1].reshape(num_eval_points))
+    plt.scatter(dataset_X[id].reshape(num_eval_points), dataset_f[id].reshape(num_eval_points))
+    plt.show()
+
+def plot_posterior_samples(model, samples, s_star, x_star):
+    test_points = torch.arange(-5, 5, 0.1).cuda().double()
+    for i in range(samples.shape[0]):
+        func = model.eval_at_z(samples[i,:], test_points.unsqueeze(1))
+        plt.plot(test_points.detach().cpu().numpy(),
+            func.detach().cpu().numpy(), alpha=0.1)
+    plt.scatter(s_star.detach().cpu().numpy(), x_star.detach().cpu().numpy(),
+        s=1000, marker="+")
     plt.show()
 #%%
-dataset = generate_gp_1d_dataset()
+# dataset_X, dataset_f = generate_gp_1d_dataset()
+# np.save('pivae_models/1000_gps_X', dataset_X)
+# np.save('pivae_models/1000_gps_f', dataset_f)
+dataset_X = np.load('pivae_models/1000_gps_X.npy')
+dataset_f = np.load('pivae_models/1000_gps_f.npy')
         
 model = Model().double().cuda()
-#%%
+# model.load_state_dict(torch.load('pivae_models/z_dim_16_approx100funcs'))
+
+mcmc = MCMC(model)
 optimizer = torch.optim.Adam(model.parameters())
 #%%
+# ----------- Training ----------------
 num_funcs_to_consider = 1
-for epoch_id in range(300):
+current_max = 1000
+interval = 3
+for epoch_id in range(1000):
     print(epoch_id)
     l1s = []
     l2s = []
     l3s = []
     for function_id in range(num_funcs_to_consider):
         optimizer.zero_grad()
-        input_points = torch.tensor(dataset[function_id][0]).cuda()
-        x_vals = torch.tensor(dataset[function_id][1]).cuda()
+        input_points = torch.tensor(dataset_X[function_id]).cuda()
+        x_vals = torch.tensor(dataset_f[function_id]).cuda()
         loss, l1, l2, l3 = model.get_loss(function_id, input_points, x_vals,
             1.0, return_breakdown=True)
         loss.backward()
@@ -212,42 +293,42 @@ for epoch_id in range(300):
         l2s.append(l2.detach().cpu().numpy())
         l3s.append(l3.detach().cpu().numpy())
 
-    if epoch_id % 2 == 0:
-        num_funcs_to_consider = min(num_funcs_to_consider+1, num_training_funcs)
+    if epoch_id % interval == 0:
+        num_funcs_to_consider = min(num_funcs_to_consider+1, current_max)
 
     print("l1", np.mean(np.array(l1s)),
         "l2", np.mean(np.array(l2s)),
-        "l3", np.mean(np.array(l3s)))
+        "l3", np.mean(np.array(l3s)),
+        "num funcs", num_funcs_to_consider)
+    
 
 #%%
-func_id = 0
-input_points = torch.tensor(dataset[func_id][0])
-x_vals = torch.tensor(dataset[func_id][1])
-phi_s = model.Phi(input_points)
-beta = model.betas[func_id, :]
-x_encs = torch.matmul(phi_s, beta)
-loss_1 = (x_vals - x_encs)**2
-mean_loss_1 = torch.mean(loss_1)
-print(mean_loss_1)
-z_mean, z_std = model.encoder(beta.unsqueeze(0))
-beta_hat = model.decoder(z_mean).reshape(100)
-x_decs = torch.matmul(phi_s, beta_hat)
-loss_2 = (x_vals - x_decs)**2
-mean_loss_2 = torch.mean(loss_2)
-print(mean_loss_2)
-
-        phi_s = self.Phi(s)
-        beta = self.betas[function_id, :]
-        x_enc = torch.matmul(phi_s, beta)
-
-        loss_term_1 = (x - x_enc)**2
-
-
-
 #%%
-input_points = torch.tensor(dataset[0][0]).cuda()
-x_vals = torch.tensor(dataset[0][1]).cuda()
-loss = model.get_loss(0, input_points, x_vals, True)
+# ---- Draw some samples from the pivae
+locations = torch.arange(-5, 5, 0.2).unsqueeze(1).double().cuda()
+samples = model.draw_samples(locations, 5)
+samples = samples.detach().cpu().numpy()
+locations = locations.detach().cpu().numpy()
+for i in range(samples.shape[0]):
+    plt.plot(locations, samples[i, :])
+plt.show()
+#%%
+# ---- MCMC ----
+# s_star = torch.arange(-3, 3, 6).unsqueeze(1).double().cuda()
+# x_star = torch.linspace(-1.0, 1.0, 6).double().cuda()
+s_star = torch.tensor([-2, 2]).unsqueeze(1).double().cuda()
+x_star = torch.tensor([0, 0]).double().cuda()
+z = torch.ones((z_dim,)).double().cuda()
+mcmc_samples = mcmc.draw_samples(10000, z, 0.1, s_star, x_star)
+mcmc_samples = mcmc_samples[1000::100,:]
+# all_samples = torch.zeros((100, 16)).double().cuda()
+# for i in range(10):
+#     z = torch.randn((z_dim,)).double().cuda()
+#     mcmc_samples = mcmc.draw_samples(1000, z, 0.1, s_star, x_star)
+#     all_samples[10*i:10*(i+1), :] = mcmc_samples[500::50,:]
+
+plot_posterior_samples(model, all_samples, s_star, x_star)
+
 
 
 #%%
@@ -278,31 +359,9 @@ for i in range(10):
     print(torch.mean(torch.abs(model.betas[i, :])))
 
 #%%
-for i in range(10):
+# ------ Check reconstructions of training data -------
+for i in range(5):
     check_beta(model, i)
 #%%
-
-# Finite number of points
-X = np.arange(-5, 5, 0.2).reshape(-1, 1)
-print("X shape", X.shape)
-
-# Mean and covariance of the prior
-mu = np.zeros(X.shape)
-print("mu shape", mu.shape)
-print("mu ravel shape", mu.ravel().shape)
-cov = kernel(X, X)
-print("cov shape", cov.shape)
-
-# Draw three samples from the prior
-samples = np.random.multivariate_normal(mu.ravel(), cov, 3)
-
-print("samples shape", samples.shape)
-
-# %%
-samples = generate_gp_1d_dataset()
-for i in range(100):
-    plt.plot(np.arange(-5, 5, 0.1), samples[i, :])
-plt.show()
-
-# %%
-
+# ------ Save the model -------
+torch.save(model.state_dict(), 'pivae_models/z_dim_16_approx330funcs')
