@@ -11,7 +11,7 @@ print(torch.cuda.get_device_name())
 beta_dim = 100 # 100
 input_dim = 1
 num_phi_rbf = 100
-phi_rbf_sigma = 5 # 5
+phi_rbf_sigma = 1 # 5
 phi_hidden_layer_size = 10 # used to be 10
 z_dim = 16
 num_training_funcs = 1000 # Gives the numbers of betas to learn
@@ -26,7 +26,7 @@ decoder_h_dim_1 = 128
 decoder_h_dim_2 = 128
 decoder_h_dim_3 = 128
 
-function_xlims = [-5, 5]
+function_xlims = [-1, 1]
 
 def generate_cubic_dataset():
     x_points = np.random.uniform(low=-4, high=-2, size=(10,))
@@ -94,8 +94,8 @@ def generate_exp_dataset():
     for n in range(num_training_funcs):
         X = np.random.uniform(function_xlims[0], function_xlims[1],
             size=(num_eval_points, 1))
-        A = np.random.uniform(0, 3)
-        B = np.random.uniform(0, 1)
+        A = np.random.uniform(1, 2)
+        B = np.random.uniform(-2, 2)
         y = A * np.exp(B * X)
         output_X.append(X)
         output_samples.append(y)
@@ -275,7 +275,7 @@ class MCMC():
 
 
 def check_beta(model, id):
-    test_points = torch.arange(-5, 5, 0.1).reshape(100, 1).cuda()
+    test_points = torch.arange(function_xlims[0], function_xlims[1], 0.02).reshape(100, 1).cuda()
     phi_s = model.Phi(test_points)
     beta = model.betas[id, :]
     x_encs = torch.matmul(phi_s, beta)
@@ -289,7 +289,7 @@ def check_beta(model, id):
     plt.show()
 
 def plot_posterior_samples(model, samples, s_star, x_star):
-    test_points = torch.arange(-5, 5, 0.1).cuda().double()
+    test_points = torch.arange(function_xlims[0], function_xlims[1], 0.02).cuda().double()
     for i in range(samples.shape[0]):
         func = model.eval_at_z(samples[i,:], test_points.unsqueeze(1))
         plt.plot(test_points.detach().cpu().numpy(),
@@ -309,10 +309,10 @@ mcmc = MCMC(model)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 #%%
 # ----------- Training ----------------
-num_funcs_to_consider = 1
+num_funcs_to_consider = 5
 current_max = 32
 interval = 2
-for epoch_id in range(300):
+for epoch_id in range(100):
     # print(epoch_id)
     l1s = []
     l2s = []
@@ -342,7 +342,7 @@ for epoch_id in range(300):
 #%%
 #%%
 # ---- Draw some samples from the pivae
-locations = torch.arange(-5, 5, 0.2).unsqueeze(1).double().cuda()
+locations = torch.arange(function_xlims[0], function_xlims[1], 0.02).unsqueeze(1).double().cuda()
 samples = model.draw_samples(locations, 5)
 samples = samples.detach().cpu().numpy()
 locations = locations.detach().cpu().numpy()
@@ -353,8 +353,8 @@ plt.show()
 # ---- MCMC ----
 # s_star = torch.arange(-3, 3, 6).unsqueeze(1).double().cuda()
 # x_star = torch.linspace(-1.0, 1.0, 6).double().cuda()
-s_star = torch.tensor([-2, 2]).unsqueeze(1).double().cuda()
-x_star = torch.tensor([0.5, 4]).double().cuda()
+s_star = torch.tensor([0.5]).unsqueeze(1).double().cuda()
+x_star = torch.tensor([2.0]).double().cuda()
 z = torch.ones((z_dim,)).double().cuda()
 mcmc_samples = mcmc.draw_samples(10000, z, 0.1, s_star, x_star)
 mcmc_samples = mcmc_samples[1000::100,:]
@@ -370,7 +370,7 @@ plot_posterior_samples(model, mcmc_samples, s_star, x_star)
 
 #%%
 # ------ Check reconstructions of training data -------
-for i in range(5):
+for i in range(20):
     check_beta(model, i)
 #%%
 

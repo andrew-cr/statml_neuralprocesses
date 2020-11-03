@@ -11,7 +11,7 @@ print(torch.cuda.get_device_name())
 beta_dim = 100 # 100
 input_dim = 1
 num_phi_rbf = 100
-phi_rbf_sigma = 5 # 5
+phi_rbf_sigma = 1 # 5
 phi_hidden_layer_size = 10 # used to be 10
 z_dim = 16
 num_training_funcs = 1000 # Gives the numbers of betas to learn
@@ -26,7 +26,7 @@ decoder_h_dim_1 = 128
 decoder_h_dim_2 = 128
 decoder_h_dim_3 = 128
 
-function_xlims = [-5, 5]
+function_xlims = [-1, 1]
 
 def generate_cubic_dataset():
     x_points = np.random.uniform(low=-4, high=-2, size=(10,))
@@ -82,8 +82,8 @@ def generate_maml_sine_dataset():
         X = np.random.uniform(function_xlims[0], function_xlims[1],
             size=(num_eval_points, 1))
         amplitude = np.random.uniform(0.1, 5.0)
-        phase = np.random.uniform(0, np.pi)
-        y = amplitude * np.sin(X + phase)
+        phase = np.random.uniform(0, 2 * np.pi)
+        y = amplitude * np.sin(X*5 - phase)
         output_X.append(X)
         output_samples.append(y)
     return np.array(output_X), np.array(output_samples)
@@ -275,7 +275,7 @@ class MCMC():
 
 
 def check_beta(model, id):
-    test_points = torch.arange(-5, 5, 0.1).reshape(100, 1).cuda()
+    test_points = torch.arange(-1, 1, 0.02).reshape(100, 1).cuda()
     phi_s = model.Phi(test_points)
     beta = model.betas[id, :]
     x_encs = torch.matmul(phi_s, beta)
@@ -311,7 +311,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 #%%
 # ----------- Training ----------------
 num_funcs_to_consider = 1
-current_max = 100
+current_max = 5
 interval = 2
 for epoch_id in range(300):
     # print(epoch_id)
@@ -377,7 +377,7 @@ for i in range(5):
 
 #%%
 # --------- Plot some functions from the dataset -----------
-for i in range(10):
+for i in range(30):
     plt.scatter(dataset_X[i], dataset_f[i])
     plt.show()
 # %%
